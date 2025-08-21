@@ -3,33 +3,41 @@ use num_traits::{abs, clamp};
 use crate::prelude::*;
 use crate::series::implementations::null::NullChunked;
 
-macro_rules! impl_shift_fill {
-    ($self:ident, $periods:expr, $fill_value:expr) => {{
-        let fill_length = abs($periods) as usize;
+fn impl_shift_fill<'a, T>(
+    ca: &ChunkedArray<T>,
+    periods: i64,
+    fill_value: Option<T::Physical<'a>>,
+) -> ChunkedArray<T>
+where
+    T: PolarsDataType,
+    ChunkedArray<T>: ChunkFull<T::Physical<'a>> + ChunkFullNull,
+    T: PolarsDataType<IsNested = FalseT, IsObject = FalseT>,
+    for<'b> T::Physical<'b>: TotalOrd,
+{
+    let fill_length = abs(periods) as usize;
 
-        if fill_length >= $self.len() {
-            return match $fill_value {
-                Some(fill) => Self::full($self.name().clone(), fill, $self.len()),
-                None => Self::full_null($self.name().clone(), $self.len()),
-            };
-        }
-        let slice_offset = (-$periods).max(0) as i64;
-        let length = $self.len() - fill_length;
-        let mut slice = $self.slice(slice_offset, length);
-
-        let mut fill = match $fill_value {
-            Some(val) => Self::full($self.name().clone(), val, fill_length),
-            None => Self::full_null($self.name().clone(), fill_length),
+    if fill_length >= ca.len() {
+        return match fill_value {
+            Some(fill) => ChunkedArray::full(ca.name().clone(), fill, ca.len()),
+            None => ChunkedArray::full_null(ca.name().clone(), ca.len()),
         };
+    }
+    let slice_offset = (-periods).max(0) as i64;
+    let length = ca.len() - fill_length;
+    let mut slice = ca.slice(slice_offset, length);
 
-        if $periods < 0 {
-            slice.append(&fill).unwrap();
-            slice
-        } else {
-            fill.append(&slice).unwrap();
-            fill
-        }
-    }};
+    let mut fill = match fill_value {
+        Some(val) => ChunkedArray::full(ca.name().clone(), val, fill_length),
+        None => ChunkedArray::full_null(ca.name().clone(), fill_length),
+    };
+
+    if periods < 0 {
+        slice.append(&fill).unwrap();
+        slice
+    } else {
+        fill.append(&slice).unwrap();
+        fill
+    }
 }
 
 impl<T> ChunkShiftFill<T, Option<T::Native>> for ChunkedArray<T>
@@ -37,7 +45,7 @@ where
     T: PolarsNumericType,
 {
     fn shift_and_fill(&self, periods: i64, fill_value: Option<T::Native>) -> ChunkedArray<T> {
-        impl_shift_fill!(self, periods, fill_value)
+        impl_shift_fill::<T>(self, periods, fill_value)
     }
 }
 impl<T> ChunkShift<T> for ChunkedArray<T>
@@ -51,7 +59,7 @@ where
 
 impl ChunkShiftFill<BooleanType, Option<bool>> for BooleanChunked {
     fn shift_and_fill(&self, periods: i64, fill_value: Option<bool>) -> BooleanChunked {
-        impl_shift_fill!(self, periods, fill_value)
+        impl_shift_fill(self, periods, fill_value)
     }
 }
 
@@ -73,13 +81,13 @@ impl ChunkShiftFill<StringType, Option<&str>> for StringChunked {
 
 impl ChunkShiftFill<BinaryType, Option<&[u8]>> for BinaryChunked {
     fn shift_and_fill(&self, periods: i64, fill_value: Option<&[u8]>) -> BinaryChunked {
-        impl_shift_fill!(self, periods, fill_value)
+        impl_shift_fill(self, periods, fill_value)
     }
 }
 
 impl ChunkShiftFill<BinaryOffsetType, Option<&[u8]>> for BinaryOffsetChunked {
     fn shift_and_fill(&self, periods: i64, fill_value: Option<&[u8]>) -> BinaryOffsetChunked {
-        impl_shift_fill!(self, periods, fill_value)
+        impl_shift_fill(self, periods, fill_value)
     }
 }
 
