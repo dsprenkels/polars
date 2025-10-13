@@ -9149,7 +9149,6 @@ class DataFrame:
             .collect(optimizations=QueryOptFlags._eager())
         )
 
-    @deprecate_renamed_parameter("columns", "on", version="1.0.0")
     def pivot(
         self,
         on: ColumnNameOrSelector | Sequence[ColumnNameOrSelector],
