@@ -68,11 +68,12 @@ fn restore_logical_type(s: &Series, logical_type: &DataType) -> Series {
 /// # Note
 /// Polars'/arrow memory is not ideal for transposing operations like pivots.
 /// If you have a relatively large table, consider using a group_by over a pivot.
-pub fn pivot<I0, I1, I2, S0, S1, S2>(
+pub fn pivot<I0, I1, I2, I3, S0, S1, S2, S3>(
     pivot_df: &DataFrame,
     on: I0,
     index: Option<I1>,
     values: Option<I2>,
+    columns: Option<I3>,
     sort_columns: bool,
     agg_fn: Option<PivotAgg>,
     separator: Option<&str>,
@@ -81,10 +82,13 @@ where
     I0: IntoIterator<Item = S0>,
     I1: IntoIterator<Item = S1>,
     I2: IntoIterator<Item = S2>,
+    I3: IntoIterator<Item = S3>,
     S0: Into<PlSmallStr>,
     S1: Into<PlSmallStr>,
     S2: Into<PlSmallStr>,
+    S3: Into<PlSmallStr>,
 {
+    // TODO [amber] Handle columns argument
     let on = on.into_iter().map(Into::into).collect::<Vec<_>>();
     let (index, values) = assign_remaining_columns(pivot_df, &on, index, values)?;
     pivot_impl(
@@ -92,6 +96,7 @@ where
         &on,
         &index,
         &values,
+        &columns,
         agg_fn,
         sort_columns,
         false,
@@ -104,11 +109,12 @@ where
 /// # Note
 /// Polars'/arrow memory is not ideal for transposing operations like pivots.
 /// If you have a relatively large table, consider using a group_by over a pivot.
-pub fn pivot_stable<I0, I1, I2, S0, S1, S2>(
+pub fn pivot_stable<I0, I1, I2, I3, S0, S1, S2, S3>(
     pivot_df: &DataFrame,
     on: I0,
     index: Option<I1>,
     values: Option<I2>,
+    columns: Option<I3>,
     sort_columns: bool,
     agg_fn: Option<PivotAgg>,
     separator: Option<&str>,
@@ -117,10 +123,13 @@ where
     I0: IntoIterator<Item = S0>,
     I1: IntoIterator<Item = S1>,
     I2: IntoIterator<Item = S2>,
+    I3: IntoIterator<Item = S3>,
     S0: Into<PlSmallStr>,
     S1: Into<PlSmallStr>,
     S2: Into<PlSmallStr>,
+    S3: Into<PlSmallStr>,
 {
+    // TODO [amber] Handle columns argument
     let on = on.into_iter().map(Into::into).collect::<Vec<_>>();
     let (index, values) = assign_remaining_columns(pivot_df, &on, index, values)?;
     pivot_impl(

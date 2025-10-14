@@ -428,13 +428,14 @@ impl PyDataFrame {
     }
 
     #[cfg(feature = "pivot")]
-    #[pyo3(signature = (on, index, values, maintain_order, sort_columns, aggregate_expr, separator))]
+    #[pyo3(signature = (on, index, values, columns, maintain_order, sort_columns, aggregate_expr, separator))]
     pub fn pivot_expr(
         &self,
         py: Python<'_>,
         on: Vec<String>,
         index: Option<Vec<String>>,
         values: Option<Vec<String>>,
+        columns: Option<Vec<String>>,
         maintain_order: bool,
         sort_columns: bool,
         aggregate_expr: Option<PyExpr>,
@@ -443,7 +444,18 @@ impl PyDataFrame {
         let df = self.df.read().clone(); // Clone to avoid dead lock on re-entrance in aggregate_expr.
         let fun = if maintain_order { pivot_stable } else { pivot };
         let agg_expr = aggregate_expr.map(|expr| expr.inner);
-        py.enter_polars_df(|| fun(&df, on, index, values, sort_columns, agg_expr, separator))
+        py.enter_polars_df(|| {
+            fun(
+                &df,
+                on,
+                index,
+                values,
+                columns,
+                sort_columns,
+                agg_expr,
+                separator,
+            )
+        })
     }
 
     pub fn partition_by(

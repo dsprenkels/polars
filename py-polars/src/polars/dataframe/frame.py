@@ -9155,6 +9155,7 @@ class DataFrame:
         *,
         index: ColumnNameOrSelector | Sequence[ColumnNameOrSelector] | None = None,
         values: ColumnNameOrSelector | Sequence[ColumnNameOrSelector] | None = None,
+        columns: ColumnNameOrSelector | Sequence[ColumnNameOrSelector] | None = None,
         aggregate_function: PivotAgg | Expr | None = None,
         maintain_order: bool = True,
         sort_columns: bool = False,
@@ -9184,6 +9185,8 @@ class DataFrame:
             aggregation is specified, these are the values on which the aggregation will be computed.
             If None, all remaining columns not specified on `on` and `index` will be used.
             At least one of `index` and `values` must be specified.
+        columns
+            TODO [amber]
         aggregate_function
             Choose from:
 
@@ -9378,6 +9381,7 @@ class DataFrame:
                 on,
                 index,
                 values,
+                columns,
                 maintain_order,
                 sort_columns,
                 aggregate_expr,
