@@ -214,7 +214,10 @@ fn get_frame_observing_impl(
             },
 
             // Input order observing aggregations.
-            IRAggExpr::Implode(node) | IRAggExpr::First(node) | IRAggExpr::Last(node) => {
+            IRAggExpr::Implode(node)
+            | IRAggExpr::First(node)
+            | IRAggExpr::Last(node)
+            | IRAggExpr::Single(node) => {
                 if rec!(*node).has_frame_ordering() {
                     return Err(FrameOrderObserved);
                 }

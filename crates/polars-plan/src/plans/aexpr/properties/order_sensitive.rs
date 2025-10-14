@@ -134,6 +134,7 @@ pub fn is_order_sensitive_agg_top_level(agg: &IRAggExpr) -> bool {
         IRAggExpr::NUnique(_) => false,
         IRAggExpr::First(_) => true,
         IRAggExpr::Last(_) => true,
+        IRAggExpr::Single(_) => true,
         IRAggExpr::Mean(_) => false,
         IRAggExpr::Implode(_) => true,
         IRAggExpr::Quantile {
