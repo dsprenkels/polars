@@ -507,3 +507,14 @@ def test_streaming_group_by_all_null_21593() -> None:
 
     out = df.lazy().group_by(pl.all()).min().collect(engine="streaming")
     assert_frame_equal(df, out, check_row_order=False)
+
+
+def test_streaming_rolling_positive_offset_26732() -> None:
+    df = pl.DataFrame({"idx": [1, 2, 3], "a": [1, 1, 1]})
+    lf = df.lazy().with_columns(
+        sum=pl.sum("a").rolling(index_column="idx", period="1i", offset="5i")
+    )
+
+    expected = lf.collect(engine="in-memory")
+    result = lf.collect(engine="streaming")
+    assert_frame_equal(result, expected)

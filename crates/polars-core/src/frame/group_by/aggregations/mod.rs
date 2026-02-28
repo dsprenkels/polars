@@ -60,7 +60,7 @@ pub fn _use_rolling_kernels(
 ) -> bool {
     match groups.len() {
         0 | 1 => false,
-        _ => overlapping && monotonic && chunks.len() == 1,
+        _ => overlapping && monotonic && chunks.len() == 1 && !chunks[0].is_empty(),
     }
 }
 
