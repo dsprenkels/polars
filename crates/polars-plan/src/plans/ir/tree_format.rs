@@ -381,8 +381,7 @@ impl<'a> TreeFmtNode<'a> {
                 },
                 #[cfg(feature = "merge_sorted")]
                 MergeSorted {
-                    input_left,
-                    input_right,
+                    inputs,
                     key,
                     maintain_order,
                 } => ND(
@@ -393,9 +392,10 @@ impl<'a> TreeFmtNode<'a> {
                             maintain_order
                         ),
                     ),
-                    [self.lp_node(Some("LEFT PLAN:".to_string()), *input_left)]
-                        .into_iter()
-                        .chain([self.lp_node(Some("RIGHT PLAN:".to_string()), *input_right)])
+                    inputs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, input)| self.lp_node(Some(format!("PLAN {i}:")), *input))
                         .collect(),
                 ),
                 UnoptimizedDispatch { inputs, operation } => ND(

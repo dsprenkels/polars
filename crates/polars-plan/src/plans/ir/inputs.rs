@@ -222,11 +222,7 @@ impl IR {
             #[cfg(feature = "python")]
             PythonScan { .. } => Inputs::Empty,
             #[cfg(feature = "merge_sorted")]
-            MergeSorted {
-                input_left,
-                input_right,
-                ..
-            } => Inputs::double(*input_left, *input_right),
+            MergeSorted { inputs, .. } => Inputs::slice(inputs),
             UnoptimizedDispatch { inputs, .. } => Inputs::slice(inputs),
             Invalid => unreachable!(),
         }
@@ -265,11 +261,7 @@ impl IR {
             #[cfg(feature = "python")]
             PythonScan { .. } => InputsMut::Empty,
             #[cfg(feature = "merge_sorted")]
-            MergeSorted {
-                input_left,
-                input_right,
-                ..
-            } => InputsMut::double(input_left, input_right),
+            MergeSorted { inputs, .. } => InputsMut::slice(inputs),
             UnoptimizedDispatch { inputs, .. } => InputsMut::slice(inputs),
             Invalid => unreachable!(),
         }

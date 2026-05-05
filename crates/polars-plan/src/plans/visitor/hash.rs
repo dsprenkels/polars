@@ -267,8 +267,7 @@ impl Hash for IRHashWrap<'_> {
             },
             #[cfg(feature = "merge_sorted")]
             IR::MergeSorted {
-                input_left: _,
-                input_right: _,
+                inputs: _,
                 key,
                 maintain_order,
             } => {

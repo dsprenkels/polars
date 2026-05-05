@@ -112,7 +112,7 @@ impl IR {
             },
             ExtContext { schema, .. } => schema,
             #[cfg(feature = "merge_sorted")]
-            MergeSorted { input_left, .. } => return arena.get(*input_left).schema(arena),
+            MergeSorted { inputs, .. } => return arena.get(inputs[0]).schema(arena),
             UnoptimizedDispatch { inputs, operation } => {
                 let input_schemas = inputs
                     .iter()
@@ -179,7 +179,7 @@ impl IR {
                 function.schema(&input_schema).unwrap().into_owned()
             },
             #[cfg(feature = "merge_sorted")]
-            MergeSorted { input_left, .. } => IR::schema_with_cache(*input_left, arena, cache),
+            MergeSorted { inputs, .. } => IR::schema_with_cache(inputs[0], arena, cache),
             UnoptimizedDispatch { inputs, operation } => {
                 let input_schemas = inputs
                     .iter()

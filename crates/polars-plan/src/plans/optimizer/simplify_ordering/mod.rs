@@ -411,28 +411,25 @@ impl SimplifyIRNodeOrder<'_> {
             },
 
             #[cfg(feature = "merge_sorted")]
-            IR::MergeSorted {
-                input_left,
-                input_right,
-                key: _,
-                ..
-            } => {
-                let ([in_edge_lhs, in_edge_rhs], [out_edge]) = unpack_edges!(3);
+            IR::MergeSorted { inputs, key: _, .. } => {
+                assert_eq!(out_edges.len(), 1);
+                let out_edge_key = out_edges[0];
 
-                if out_edge.is_unordered()
-                    || (in_edge_lhs.is_unordered() && in_edge_rhs.is_unordered())
+                if get_edge!(out_edge_key).is_unordered()
+                    || in_edges
+                        .iter()
+                        .all(|edge_key| get_edge!(*edge_key).is_unordered())
                 {
-                    *out_edge = Edge::Unordered;
-                    *in_edge_lhs = Edge::Unordered;
-                    *in_edge_rhs = Edge::Unordered;
+                    *get_edge_mut!(out_edge_key) = Edge::Unordered;
+                    for edge_key in in_edges.iter() {
+                        *get_edge_mut!(*edge_key) = Edge::Unordered;
+                    }
 
-                    let input_left = *input_left;
-                    let input_right = *input_right;
-
+                    let inputs = std::mem::take(inputs);
                     self.ir_arena.replace(
                         current_ir_node,
                         IR::Union {
-                            inputs: vec![input_left, input_right],
+                            inputs,
                             options: UnionOptions {
                                 maintain_order: false,
                                 ..Default::default()

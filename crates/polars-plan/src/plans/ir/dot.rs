@@ -317,13 +317,13 @@ impl<'a> IRDotDisplay<'a> {
             },
             #[cfg(feature = "merge_sorted")]
             MergeSorted {
-                input_left,
-                input_right,
+                inputs,
                 key,
                 maintain_order,
             } => {
-                recurse!(*input_left);
-                recurse!(*input_right);
+                for input in inputs {
+                    recurse!(*input);
+                }
 
                 write_label(f, id, |f| {
                     write!(

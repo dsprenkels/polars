@@ -143,8 +143,7 @@ pub(crate) enum SerializableDslPlanNode {
     },
     #[cfg(feature = "merge_sorted")]
     MergeSorted {
-        input_left: DslPlanKey,
-        input_right: DslPlanKey,
+        inputs: Vec<DslPlanKey>,
         key: PlSmallStr,
         maintain_order: bool,
     },
@@ -358,13 +357,14 @@ fn convert_dsl_plan_to_serializable_plan(
         },
         #[cfg(feature = "merge_sorted")]
         DP::MergeSorted {
-            input_left,
-            input_right,
+            inputs,
             key,
             maintain_order,
         } => SP::MergeSorted {
-            input_left: dsl_plan_key(input_left, arenas),
-            input_right: dsl_plan_key(input_right, arenas),
+            inputs: inputs
+                .iter()
+                .map(|input| dsl_plan_key(input, arenas))
+                .collect(),
             key: key.clone(),
             maintain_order: *maintain_order,
         },
@@ -608,13 +608,14 @@ fn try_convert_serializable_plan_to_dsl_plan(
         }),
         #[cfg(feature = "merge_sorted")]
         SP::MergeSorted {
-            input_left,
-            input_right,
+            inputs,
             key,
             maintain_order,
         } => Ok(DP::MergeSorted {
-            input_left: get_dsl_plan(*input_left, ser_dsl_plan, arenas)?,
-            input_right: get_dsl_plan(*input_right, ser_dsl_plan, arenas)?,
+            inputs: inputs
+                .iter()
+                .map(|input| get_dsl_plan(*input, ser_dsl_plan, arenas))
+                .collect::<Result<Vec<_>, _>>()?,
             key: key.clone(),
             maintain_order: *maintain_order,
         }),

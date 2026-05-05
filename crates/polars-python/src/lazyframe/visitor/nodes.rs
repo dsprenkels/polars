@@ -276,9 +276,7 @@ pub struct Join {
 /// Merge sorted operation
 pub struct MergeSorted {
     #[pyo3(get)]
-    input_left: usize,
-    #[pyo3(get)]
-    input_right: usize,
+    inputs: Vec<usize>,
     #[pyo3(get)]
     key: String,
     #[pyo3(get)]
@@ -743,13 +741,11 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<Py<PyAny>> {
         )),
         #[cfg(feature = "merge_sorted")]
         IR::MergeSorted {
-            input_left,
-            input_right,
+            inputs,
             key,
             maintain_order,
         } => MergeSorted {
-            input_left: input_left.0,
-            input_right: input_right.0,
+            inputs: inputs.iter().map(|input| input.0).collect(),
             key: key.to_string(),
             maintain_order: *maintain_order,
         }

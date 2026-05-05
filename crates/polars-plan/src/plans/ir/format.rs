@@ -242,19 +242,14 @@ impl<'a> IRDisplay<'a> {
                 write!(f, "\n{:indent$}END SINK_MULTIPLE", "")
             },
             #[cfg(feature = "merge_sorted")]
-            MergeSorted {
-                input_left,
-                input_right,
-                key: _,
-                ..
-            } => {
+            MergeSorted { inputs, key: _, .. } => {
                 write_ir_non_recursive(f, ir_node, self.lp.expr_arena, output_schema, indent)?;
                 write!(f, ":")?;
 
-                write!(f, "\n{:indent$}LEFT PLAN:", "")?;
-                self.with_root(*input_left)._format(f, sub_indent)?;
-                write!(f, "\n{:indent$}RIGHT PLAN:", "")?;
-                self.with_root(*input_right)._format(f, sub_indent)?;
+                for (i, input) in inputs.iter().enumerate() {
+                    write!(f, "\n{:indent$}PLAN {i}:", "")?;
+                    self.with_root(*input)._format(f, sub_indent)?;
+                }
                 write!(f, "\n{:indent$}END MERGE_SORTED", "")
             },
             ir_node => {
@@ -1000,8 +995,7 @@ pub fn write_ir_non_recursive(
         IR::SinkMultiple { inputs: _ } => write!(f, "{:indent$}SINK_MULTIPLE", ""),
         #[cfg(feature = "merge_sorted")]
         IR::MergeSorted {
-            input_left: _,
-            input_right: _,
+            inputs: _,
             key,
             maintain_order,
         } => write!(

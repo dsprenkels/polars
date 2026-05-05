@@ -166,8 +166,7 @@ pub enum DslPlan {
     },
     #[cfg(feature = "merge_sorted")]
     MergeSorted {
-        input_left: Arc<DslPlan>,
-        input_right: Arc<DslPlan>,
+        inputs: Vec<Arc<DslPlan>>,
         key: PlSmallStr,
         maintain_order: bool,
     },
@@ -212,7 +211,7 @@ impl Clone for DslPlan {
             #[cfg(feature = "pivot")]
             Self::Pivot { input, on, on_columns, index, values, agg, separator, maintain_order, column_naming }  => Self::Pivot { input: input.clone(), on: on.clone(), on_columns: on_columns.clone(), index: index.clone(), values: values.clone(), agg: agg.clone(), separator: separator.clone(), maintain_order: *maintain_order, column_naming: *column_naming },
             #[cfg(feature = "merge_sorted")]
-            Self::MergeSorted { input_left, input_right, key, maintain_order } => Self::MergeSorted { input_left: input_left.clone(), input_right: input_right.clone(), key: key.clone(), maintain_order: *maintain_order },
+            Self::MergeSorted { inputs, key, maintain_order } => Self::MergeSorted { inputs: inputs.clone(), key: key.clone(), maintain_order: *maintain_order },
             Self::IR {node, dsl, version} => Self::IR {node: *node, dsl: dsl.clone(), version: *version},
         }
     }

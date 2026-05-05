@@ -1954,8 +1954,7 @@ impl LazyFrame {
         let key = key.into();
 
         let lp = DslPlan::MergeSorted {
-            input_left: Arc::new(self.logical_plan),
-            input_right: Arc::new(other.logical_plan),
+            inputs: vec![Arc::new(self.logical_plan), Arc::new(other.logical_plan)],
             key,
             maintain_order,
         };

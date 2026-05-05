@@ -1544,30 +1544,38 @@ pub fn to_alp_impl(lp: DslPlan, ctxt: &mut DslConversionContext) -> PolarsResult
         },
         #[cfg(feature = "merge_sorted")]
         DslPlan::MergeSorted {
-            input_left,
-            input_right,
+            inputs,
             key,
             maintain_order,
         } => {
-            let input_left = to_alp_impl(owned(input_left), ctxt)
-                .map_err(|e| e.context(failed_here!(merge_sorted)))?;
-            let input_right = to_alp_impl(owned(input_right), ctxt)
-                .map_err(|e| e.context(failed_here!(merge_sorted)))?;
+            polars_ensure!(
+                inputs.len() >= 2,
+                InvalidOperation: "`merge_sorted` expected at least two inputs",
+            );
 
-            let left_schema = ctxt.lp_arena.get(input_left).schema(ctxt.lp_arena);
-            let right_schema = ctxt.lp_arena.get(input_right).schema(ctxt.lp_arena);
+            let inputs = inputs
+                .into_iter()
+                .map(|input| {
+                    to_alp_impl(owned(input), ctxt)
+                        .map_err(|e| e.context(failed_here!(merge_sorted)))
+                })
+                .collect::<PolarsResult<Vec<_>>>()?;
 
-            left_schema
-                .ensure_is_exact_match(&right_schema)
-                .map_err(|err| err.context("merge_sorted".into()))?;
+            let first_schema = ctxt.lp_arena.get(inputs[0]).schema(ctxt.lp_arena);
 
-            left_schema
+            for input in inputs.iter().skip(1) {
+                let schema = ctxt.lp_arena.get(*input).schema(ctxt.lp_arena);
+                first_schema
+                    .ensure_is_exact_match(&schema)
+                    .map_err(|err| err.context("merge_sorted".into()))?;
+            }
+
+            first_schema
                 .try_get(key.as_str())
                 .map_err(|err| err.context("merge_sorted".into()))?;
 
             IR::MergeSorted {
-                input_left,
-                input_right,
+                inputs,
                 key,
                 maintain_order,
             }

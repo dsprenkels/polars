@@ -38,14 +38,7 @@ impl DslPlan {
             #[cfg(feature = "python")]
             PythonScan { .. } => (),
             #[cfg(feature = "merge_sorted")]
-            MergeSorted {
-                input_left,
-                input_right,
-                ..
-            } => {
-                scratch.push(input_left);
-                scratch.push(input_right);
-            },
+            MergeSorted { inputs, .. } => scratch.extend(inputs.iter().map(AsRef::as_ref)),
         }
     }
 }

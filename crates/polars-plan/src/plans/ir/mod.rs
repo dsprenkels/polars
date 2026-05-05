@@ -157,8 +157,7 @@ pub enum IR {
     },
     #[cfg(feature = "merge_sorted")]
     MergeSorted {
-        input_left: Node,
-        input_right: Node,
+        inputs: Vec<Node>,
         key: PlSmallStr,
         maintain_order: bool,
     },
