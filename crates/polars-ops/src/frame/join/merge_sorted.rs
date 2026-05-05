@@ -1,11 +1,171 @@
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+
+use arrow::array::builder::ShareStrategy;
 use arrow::legacy::utils::CustomIterTools;
 #[cfg(feature = "dtype-categorical")]
 use polars_core::datatypes::CategoricalPhysical;
+use polars_core::frame::builder::DataFrameBuilder;
 use polars_core::prelude::*;
 #[cfg(feature = "dtype-categorical")]
 use polars_core::with_match_categorical_physical_type;
 use polars_core::with_match_physical_numeric_polars_type;
+use polars_utils::total_ord::ToTotalOrd;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct HeapEntry<K> {
+    input_idx: usize,
+    key: K,
+}
+
+impl<K: Ord> Ord for HeapEntry<K> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .key
+            .cmp(&self.key)
+            .then_with(|| other.input_idx.cmp(&self.input_idx))
+    }
+}
+
+impl<K: Ord> PartialOrd for HeapEntry<K> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub fn _merge_sorted_dfs_many(
+    dfs: &[DataFrame],
+    key: &str,
+    check_schema: bool,
+) -> PolarsResult<DataFrame> {
+    let Some((first, rest)) = dfs.split_first() else {
+        polars_bail!(NoData: "empty container given");
+    };
+
+    if check_schema {
+        for df in rest {
+            first.schema_equal(df)?;
+        }
+    }
+
+    let dtype = first.column(key)?.as_materialized_series().dtype().clone();
+    let mut non_empty = Vec::with_capacity(dfs.len());
+    for df in dfs {
+        let key_s = df.column(key)?.as_materialized_series();
+        polars_ensure!(
+            key_s.dtype() == &dtype,
+            ComputeError: "merge-sort datatype mismatch: {} != {}", dtype, key_s.dtype()
+        );
+
+        if !key_s.is_empty() {
+            non_empty.push((df, key_s.clone()));
+        }
+    }
+
+    match non_empty.len() {
+        0 => return Ok(first.clone()),
+        1 => return Ok(non_empty[0].0.clone()),
+        _ => {},
+    }
+
+    if non_empty.iter().any(|(_, key_s)| key_s.null_count() > 0) {
+        return merge_sorted_dfs_pairwise(dfs, key, check_schema);
+    }
+
+    let physical_keys = non_empty
+        .iter()
+        .map(|(_, key_s)| key_s.to_physical_repr().into_owned())
+        .collect::<Vec<_>>();
+    let frames = non_empty.iter().map(|(df, _)| *df).collect::<Vec<_>>();
+
+    match physical_keys[0].dtype() {
+        dt if dt.is_primitive_numeric() => {
+            // TODO: real experiment path. Everything else falls back to the old
+            // pairwise kernel until we know this is worth making generic.
+            with_match_physical_numeric_polars_type!(dt, |$T| {
+                let keys = physical_keys
+                    .iter()
+                    .map(|s| {
+                        let ca: &ChunkedArray<$T> = s.as_ref().as_ref().as_ref();
+                        ca
+                    })
+                    .collect::<Vec<_>>();
+
+                Ok(merge_ordered_frames(&frames, |input_idx, idx| unsafe {
+                    keys[input_idx].value_unchecked(idx).to_total_ord()
+                }))
+            })
+        },
+        _ => merge_sorted_dfs_pairwise(dfs, key, check_schema),
+    }
+}
+
+fn merge_sorted_dfs_pairwise(
+    dfs: &[DataFrame],
+    key: &str,
+    check_schema: bool,
+) -> PolarsResult<DataFrame> {
+    let Some((first, rest)) = dfs.split_first() else {
+        polars_bail!(NoData: "empty container given");
+    };
+
+    let mut out = first.clone();
+    for df in rest {
+        let left_s = out.column(key)?.as_materialized_series();
+        let right_s = df.column(key)?.as_materialized_series();
+        out = _merge_sorted_dfs(&out, df, left_s, right_s, check_schema)?;
+    }
+    Ok(out)
+}
+
+fn merge_ordered_frames<K: Ord + Copy>(
+    dfs: &[&DataFrame],
+    mut key_at: impl FnMut(usize, usize) -> K,
+) -> DataFrame {
+    let lengths = dfs.iter().map(|df| df.height()).collect::<Vec<_>>();
+    let total_len = lengths.iter().sum();
+    let mut builder = DataFrameBuilder::new(dfs[0].schema().clone());
+    builder.reserve(total_len);
+
+    let mut positions = vec![0; dfs.len()];
+    let mut heap = BinaryHeap::with_capacity(dfs.len());
+
+    for input_idx in 0..dfs.len() {
+        heap.push(HeapEntry {
+            input_idx,
+            key: key_at(input_idx, 0),
+        });
+    }
+
+    while let Some(HeapEntry { input_idx, .. }) = heap.pop() {
+        let start = positions[input_idx];
+        positions[input_idx] += 1;
+
+        while positions[input_idx] < lengths[input_idx] {
+            let current = key_at(input_idx, positions[input_idx]);
+            if heap.peek().is_some_and(|next| current > next.key) {
+                break;
+            }
+            positions[input_idx] += 1;
+        }
+
+        builder.subslice_extend(
+            dfs[input_idx],
+            start,
+            positions[input_idx] - start,
+            ShareStrategy::Never,
+        );
+
+        if positions[input_idx] < lengths[input_idx] {
+            heap.push(HeapEntry {
+                input_idx,
+                key: key_at(input_idx, positions[input_idx]),
+            });
+        }
+    }
+
+    builder.freeze()
+}
 pub fn _merge_sorted_dfs(
     left: &DataFrame,
     right: &DataFrame,

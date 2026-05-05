@@ -32,7 +32,7 @@ use hashbrown::hash_map::{Entry, RawEntryMut};
 #[cfg(feature = "iejoin")]
 pub use iejoin::{IEJoinOptions, InequalityOperator};
 #[cfg(feature = "merge_sorted")]
-pub use merge_sorted::_merge_sorted_dfs;
+pub use merge_sorted::{_merge_sorted_dfs, _merge_sorted_dfs_many};
 use polars_core::POOL;
 #[allow(unused_imports)]
 use polars_core::chunked_array::ops::row_encode::{

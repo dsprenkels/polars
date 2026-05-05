@@ -803,8 +803,7 @@ fn create_physical_plan_impl(
         MergeSorted {
             inputs,
             key,
-            // In the in-memory engine, merge_sorted is always order-maintaining.
-            maintain_order: _,
+            maintain_order,
         } => {
             polars_ensure!(
                 !inputs.is_empty(),
@@ -817,7 +816,15 @@ fn create_physical_plan_impl(
                     .collect::<PolarsResult<Vec<_>>>()
             })?;
 
-            Ok(build_merge_sorted_executor(inputs, key))
+            // TODO: temporary benchmarking wiring. For true N-way unordered
+            // merges, force the IR node through the heap/DataFrameBuilder
+            // implementation. Keep maintain_order and plain binary merges on
+            // the old path while this is still a perf experiment.
+            if maintain_order || inputs.len() <= 2 {
+                Ok(build_merge_sorted_executor(inputs, key))
+            } else {
+                Ok(Box::new(executors::MergeSortedMany { inputs, key }))
+            }
         },
         UnoptimizedDispatch { .. } => get_streaming_executor_builder()(root, lp_arena, expr_arena),
         Invalid => unreachable!(),
