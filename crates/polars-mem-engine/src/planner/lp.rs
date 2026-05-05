@@ -801,31 +801,54 @@ fn create_physical_plan_impl(
         },
         #[cfg(feature = "merge_sorted")]
         MergeSorted {
-            input_left,
-            input_right,
+            inputs,
             key,
             // In the in-memory engine, merge_sorted is always order-maintaining.
             maintain_order: _,
         } => {
-            let (input_left, input_right) = state.with_new_branch(|new_state| {
-                (
-                    recurse!(input_left, new_state),
-                    recurse!(input_right, new_state),
-                )
-            });
-            let input_left = input_left?;
-            let input_right = input_right?;
+            polars_ensure!(
+                !inputs.is_empty(),
+                InvalidOperation: "`merge_sorted` expected at least one input",
+            );
+            let inputs = state.with_new_branch(|new_state| {
+                inputs
+                    .into_iter()
+                    .map(|input| recurse!(input, new_state))
+                    .collect::<PolarsResult<Vec<_>>>()
+            })?;
 
-            let exec = executors::MergeSorted {
-                input_left,
-                input_right,
-                key,
-            };
-            Ok(Box::new(exec))
+            Ok(build_merge_sorted_executor(inputs, key))
         },
         UnoptimizedDispatch { .. } => get_streaming_executor_builder()(root, lp_arena, expr_arena),
         Invalid => unreachable!(),
     }
+}
+
+#[cfg(feature = "merge_sorted")]
+fn build_merge_sorted_executor(
+    mut inputs: Vec<Box<dyn Executor>>,
+    key: PlSmallStr,
+) -> Box<dyn Executor> {
+    debug_assert!(!inputs.is_empty());
+
+    while inputs.len() > 1 {
+        let mut next = Vec::with_capacity(inputs.len().div_ceil(2));
+        let mut iter = inputs.into_iter();
+        while let Some(input_left) = iter.next() {
+            let Some(input_right) = iter.next() else {
+                next.push(input_left);
+                continue;
+            };
+            next.push(Box::new(executors::MergeSorted {
+                input_left,
+                input_right,
+                key: key.clone(),
+            }) as Box<dyn Executor>);
+        }
+        inputs = next;
+    }
+
+    inputs.pop().unwrap()
 }
 
 #[cfg(test)]

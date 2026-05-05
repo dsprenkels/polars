@@ -329,61 +329,63 @@ pub fn lower_ir(
 
         #[cfg(feature = "merge_sorted")]
         IR::MergeSorted {
-            input_left,
-            input_right,
+            inputs,
             key,
             maintain_order,
         } => {
-            let input_left = *input_left;
-            let input_right = *input_right;
+            let inputs = inputs.clone();
             let key = key.clone();
             let maintain_order = *maintain_order;
+            let output_schema = output_schema.clone();
 
-            let mut phys_left = lower_ir!(input_left)?;
-            let mut phys_right = lower_ir!(input_right)?;
+            polars_ensure!(
+                !inputs.is_empty(),
+                InvalidOperation: "`merge_sorted` expected at least one input",
+            );
 
-            let left_schema = phys_left.output_schema(phys_sm);
-            let right_schema = phys_right.output_schema(phys_sm);
+            let mut phys_inputs = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                phys_inputs.push(lower_ir!(input)?);
+            }
 
-            left_schema.ensure_is_exact_match(right_schema).unwrap();
+            if phys_inputs.len() == 1 {
+                return Ok(phys_inputs.pop().unwrap());
+            }
 
-            let key_dtype = left_schema.try_get(key.as_str())?.clone();
+            let first_schema = phys_inputs[0].output_schema(phys_sm).clone();
+            for phys_input in phys_inputs.iter().skip(1) {
+                first_schema
+                    .ensure_is_exact_match(phys_input.output_schema(phys_sm))
+                    .unwrap();
+            }
 
-            let key_name = unique_column_name();
-            use polars_plan::plans::{AExprBuilder, RowEncodingVariant};
+            let key_dtype = first_schema.try_get(key.as_str())?.clone();
 
-            // Add the key column as the last column for both inputs.
-            for s in [&mut phys_left, &mut phys_right] {
-                let key_dtype = key_dtype.clone();
-                let mut expr = AExprBuilder::col(key.clone(), expr_arena);
-                if key_dtype.is_nested() {
-                    expr = AExprBuilder::row_encode(
-                        vec![expr.expr_ir(key_name.clone())],
-                        vec![key_dtype],
-                        RowEncodingVariant::Ordered {
-                            descending: None,
-                            nulls_last: None,
-                            broadcast_nulls: None,
-                        },
+            while phys_inputs.len() > 1 {
+                let mut next = Vec::with_capacity(phys_inputs.len().div_ceil(2));
+                let mut iter = phys_inputs.into_iter();
+                while let Some(input_left) = iter.next() {
+                    let Some(input_right) = iter.next() else {
+                        next.push(input_left);
+                        continue;
+                    };
+                    next.push(build_binary_merge_sorted_stream(
+                        input_left,
+                        input_right,
+                        &key,
+                        &key_dtype,
+                        output_schema.clone(),
+                        maintain_order,
                         expr_arena,
-                    );
+                        phys_sm,
+                        expr_cache,
+                        ctx,
+                    )?);
                 }
-
-                *s = build_hstack_stream(
-                    *s,
-                    &[expr.expr_ir(key_name.clone())],
-                    expr_arena,
-                    phys_sm,
-                    expr_cache,
-                    ctx,
-                )?;
+                phys_inputs = next;
             }
 
-            PhysNodeKind::MergeSorted {
-                input_left: phys_left,
-                input_right: phys_right,
-                maintain_order,
-            }
+            return Ok(phys_inputs.pop().unwrap());
         },
 
         IR::MapFunction { input, function } => {
@@ -1644,6 +1646,90 @@ pub fn lower_ir(
 
     let node_key = phys_sm.insert(PhysNode::new(output_schema, node_kind));
     Ok(PhysStream::first(node_key))
+}
+
+#[cfg(feature = "merge_sorted")]
+#[allow(clippy::too_many_arguments)]
+fn build_binary_merge_sorted_stream(
+    input_left: PhysStream,
+    input_right: PhysStream,
+    key: &PlSmallStr,
+    key_dtype: &DataType,
+    output_schema: Arc<Schema>,
+    maintain_order: bool,
+    expr_arena: &mut Arena<AExpr>,
+    phys_sm: &mut SlotMap<PhysNodeKey, PhysNode>,
+    expr_cache: &mut ExprCache,
+    ctx: StreamingLowerIRContext<'_>,
+) -> PolarsResult<PhysStream> {
+    let key_name = unique_column_name();
+    let input_left = append_merge_sorted_key_column(
+        input_left,
+        key,
+        key_dtype,
+        key_name.clone(),
+        expr_arena,
+        phys_sm,
+        expr_cache,
+        ctx,
+    )?;
+    let input_right = append_merge_sorted_key_column(
+        input_right,
+        key,
+        key_dtype,
+        key_name,
+        expr_arena,
+        phys_sm,
+        expr_cache,
+        ctx,
+    )?;
+
+    Ok(PhysStream::first(phys_sm.insert(PhysNode::new(
+        output_schema,
+        PhysNodeKind::MergeSorted {
+            input_left,
+            input_right,
+            maintain_order,
+        },
+    ))))
+}
+
+#[cfg(feature = "merge_sorted")]
+#[allow(clippy::too_many_arguments)]
+fn append_merge_sorted_key_column(
+    phys_input: PhysStream,
+    key: &PlSmallStr,
+    key_dtype: &DataType,
+    key_name: PlSmallStr,
+    expr_arena: &mut Arena<AExpr>,
+    phys_sm: &mut SlotMap<PhysNodeKey, PhysNode>,
+    expr_cache: &mut ExprCache,
+    ctx: StreamingLowerIRContext<'_>,
+) -> PolarsResult<PhysStream> {
+    use polars_plan::plans::{AExprBuilder, RowEncodingVariant};
+
+    let mut expr = AExprBuilder::col(key.clone(), expr_arena);
+    if key_dtype.is_nested() {
+        expr = AExprBuilder::row_encode(
+            vec![expr.expr_ir(key_name.clone())],
+            vec![key_dtype.clone()],
+            RowEncodingVariant::Ordered {
+                descending: None,
+                nulls_last: None,
+                broadcast_nulls: None,
+            },
+            expr_arena,
+        );
+    }
+
+    build_hstack_stream(
+        phys_input,
+        &[expr.expr_ir(key_name)],
+        expr_arena,
+        phys_sm,
+        expr_cache,
+        ctx,
+    )
 }
 
 #[cfg(feature = "iejoin")]
