@@ -1,15 +1,14 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use arrow::array::builder::ShareStrategy;
 use arrow::legacy::utils::CustomIterTools;
 #[cfg(feature = "dtype-categorical")]
 use polars_core::datatypes::CategoricalPhysical;
-use polars_core::frame::builder::DataFrameBuilder;
 use polars_core::prelude::*;
 #[cfg(feature = "dtype-categorical")]
 use polars_core::with_match_categorical_physical_type;
 use polars_core::with_match_physical_numeric_polars_type;
+use polars_utils::itertools::Itertools;
 use polars_utils::total_ord::ToTotalOrd;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -91,9 +90,9 @@ pub fn _merge_sorted_dfs_many(
                     })
                     .collect::<Vec<_>>();
 
-                Ok(merge_ordered_frames(&frames, |input_idx, idx| unsafe {
+                merge_ordered_frames(&frames, |input_idx, idx| unsafe {
                     keys[input_idx].value_unchecked(idx).to_total_ord()
-                }))
+                })
             })
         },
         _ => merge_sorted_dfs_pairwise(dfs, key, check_schema),
@@ -120,14 +119,13 @@ fn merge_sorted_dfs_pairwise(
 
 fn merge_ordered_frames<K: Ord + Copy>(
     dfs: &[&DataFrame],
-    mut key_at: impl FnMut(usize, usize) -> K,
-) -> DataFrame {
+    key_at: impl Fn(usize, usize) -> K,
+) -> PolarsResult<DataFrame> {
     let lengths = dfs.iter().map(|df| df.height()).collect::<Vec<_>>();
-    let total_len = lengths.iter().sum();
-    let mut builder = DataFrameBuilder::new(dfs[0].schema().clone());
-    builder.reserve(total_len);
+    let total_len: usize = lengths.iter().sum();
+    let mut merge_indicator: Vec<u8> = Vec::with_capacity(total_len);
 
-    let mut positions = vec![0; dfs.len()];
+    let mut positions = vec![0usize; dfs.len()];
     let mut heap = BinaryHeap::with_capacity(dfs.len());
 
     for input_idx in 0..dfs.len() {
@@ -138,7 +136,7 @@ fn merge_ordered_frames<K: Ord + Copy>(
     }
 
     while let Some(HeapEntry { input_idx, .. }) = heap.pop() {
-        let start = positions[input_idx];
+        merge_indicator.push(input_idx as u8);
         positions[input_idx] += 1;
 
         while positions[input_idx] < lengths[input_idx] {
@@ -146,15 +144,9 @@ fn merge_ordered_frames<K: Ord + Copy>(
             if heap.peek().is_some_and(|next| current > next.key) {
                 break;
             }
+            merge_indicator.push(input_idx as u8);
             positions[input_idx] += 1;
         }
-
-        builder.subslice_extend(
-            dfs[input_idx],
-            start,
-            positions[input_idx] - start,
-            ShareStrategy::Never,
-        );
 
         if positions[input_idx] < lengths[input_idx] {
             heap.push(HeapEntry {
@@ -164,7 +156,27 @@ fn merge_ordered_frames<K: Ord + Copy>(
         }
     }
 
-    builder.freeze()
+    let new_columns = (0..dfs[0].width())
+        .map(|col_idx| {
+            let orig_col = &dfs[0].columns()[col_idx];
+            let phys_ss: Vec<Series> = dfs
+                .iter()
+                .map(|df| {
+                    df.columns()[col_idx]
+                        .to_physical_repr()
+                        .as_materialized_series()
+                        .clone()
+                })
+                .collect();
+            let merged = merge_series(&phys_ss, &merge_indicator)?;
+            let out = Column::from(merged);
+            let mut out = unsafe { out.from_physical_unchecked(orig_col.dtype()) }.unwrap();
+            out.rename(orig_col.name().clone());
+            Ok(out)
+        })
+        .collect::<PolarsResult<Vec<_>>>()?;
+
+    Ok(unsafe { DataFrame::new_unchecked(total_len, new_columns) })
 }
 pub fn _merge_sorted_dfs(
     left: &DataFrame,
@@ -201,8 +213,10 @@ pub fn _merge_sorted_dfs(
             let rhs_phys = rhs.to_physical_repr();
 
             let out = Column::from(merge_series(
-                lhs_phys.as_materialized_series(),
-                rhs_phys.as_materialized_series(),
+                &[
+                    lhs_phys.as_materialized_series().clone(),
+                    rhs_phys.as_materialized_series().clone(),
+                ],
                 &merge_indicator,
             )?);
 
@@ -215,66 +229,74 @@ pub fn _merge_sorted_dfs(
     Ok(unsafe { DataFrame::new_unchecked(left.height() + right.height(), new_columns) })
 }
 
-fn merge_series(lhs: &Series, rhs: &Series, merge_indicator: &[bool]) -> PolarsResult<Series> {
+fn merge_series(ss: &[Series], merge_indicator: &[u8]) -> PolarsResult<Series> {
     use DataType::*;
-    let out = match lhs.dtype() {
+    let out = match ss[0].dtype() {
         Null => Series::new_null(PlSmallStr::EMPTY, merge_indicator.len()),
         Boolean => {
-            let lhs = lhs.bool().unwrap();
-            let rhs = rhs.bool().unwrap();
-
-            merge_ca(lhs, rhs, merge_indicator).into_series()
+            let ss = ss.iter().map(|s| s.bool().unwrap()).collect_vec();
+            merge_ca(&ss[..], merge_indicator).into_series()
         },
         String => {
             // dispatch via binary
-            let lhs = lhs.str().unwrap().as_binary();
-            let rhs = rhs.str().unwrap().as_binary();
-            let out = merge_ca(&lhs, &rhs, merge_indicator);
+            let binaries = ss
+                .iter()
+                .map(|s| s.str().unwrap().as_binary())
+                .collect_vec();
+            let refs: Vec<&BinaryChunked> = binaries.iter().collect();
+            let out = merge_ca(&refs, merge_indicator);
             unsafe { out.to_string_unchecked() }.into_series()
         },
         Binary => {
-            let lhs = lhs.binary().unwrap();
-            let rhs = rhs.binary().unwrap();
-            merge_ca(lhs, rhs, merge_indicator).into_series()
+            let refs: Vec<&BinaryChunked> = ss.iter().map(|s| s.binary().unwrap()).collect_vec();
+            merge_ca(&refs, merge_indicator).into_series()
         },
         #[cfg(feature = "dtype-extension")]
         Extension(typ, _) => {
-            let lhs = lhs.ext().unwrap();
-            let rhs = rhs.ext().unwrap();
-            merge_series(lhs.storage(), rhs.storage(), merge_indicator)?.into_extension(typ.clone())
+            let storages: Vec<Series> = ss
+                .iter()
+                .map(|s| s.ext().unwrap().storage().clone())
+                .collect();
+            merge_series(&storages, merge_indicator)?.into_extension(typ.clone())
         },
         #[cfg(feature = "dtype-struct")]
         Struct(_) => {
-            let lhs = lhs.struct_().unwrap();
-            let rhs = rhs.struct_().unwrap();
+            let struct_arrays: Vec<&StructChunked> =
+                ss.iter().map(|s| s.struct_().unwrap()).collect_vec();
 
             let mut validity = None;
-            if lhs.has_nulls() || rhs.has_nulls() {
+            if struct_arrays.iter().any(|s| s.has_nulls()) {
                 use arrow::bitmap::Bitmap;
 
-                let lhs_validity = lhs
-                    .rechunk_validity()
-                    .unwrap_or(Bitmap::new_with_value(true, lhs.len()));
-                let rhs_validity = rhs
-                    .rechunk_validity()
-                    .unwrap_or(Bitmap::new_with_value(true, rhs.len()));
-
-                let lhs_validity = BooleanChunked::from_bitmap(PlSmallStr::EMPTY, lhs_validity);
-                let rhs_validity = BooleanChunked::from_bitmap(PlSmallStr::EMPTY, rhs_validity);
-
-                let mut merged_validity = merge_ca(&lhs_validity, &rhs_validity, merge_indicator);
+                let validities: Vec<BooleanChunked> = struct_arrays
+                    .iter()
+                    .map(|s| {
+                        BooleanChunked::from_bitmap(
+                            PlSmallStr::EMPTY,
+                            s.rechunk_validity()
+                                .unwrap_or_else(|| Bitmap::new_with_value(true, s.len())),
+                        )
+                    })
+                    .collect();
+                let validity_refs: Vec<&BooleanChunked> = validities.iter().collect();
+                let mut merged_validity = merge_ca(&validity_refs, merge_indicator);
                 merged_validity.rechunk_mut();
 
                 validity = Some(merged_validity.downcast_as_array().values().clone());
             }
 
-            let new_fields = lhs
-                .fields_as_series()
-                .iter()
-                .zip(rhs.fields_as_series())
-                .map(|(lhs, rhs)| {
-                    merge_series(lhs, &rhs, merge_indicator)
-                        .map(|merged| merged.with_name(lhs.name().clone()))
+            let fields_list: Vec<Vec<Series>> =
+                struct_arrays.iter().map(|s| s.fields_as_series()).collect();
+            let n_fields = fields_list[0].len();
+            let new_fields = (0..n_fields)
+                .map(|field_idx| {
+                    let field_series: Vec<Series> = fields_list
+                        .iter()
+                        .map(|fields| fields[field_idx].clone())
+                        .collect();
+                    let name = fields_list[0][field_idx].name().clone();
+                    merge_series(&field_series, merge_indicator)
+                        .map(|merged| merged.with_name(name))
                 })
                 .collect::<PolarsResult<Vec<_>>>()?;
             StructChunked::from_series(PlSmallStr::EMPTY, new_fields[0].len(), new_fields.iter())
@@ -285,10 +307,13 @@ fn merge_series(lhs: &Series, rhs: &Series, merge_indicator: &[bool]) -> PolarsR
         #[cfg(feature = "dtype-array")]
         Array(_, _) => {
             // @Optimize. This is horrendous
-            let lhs = lhs.row_encode_unordered()?;
-            let rhs = rhs.row_encode_unordered()?;
-            let fields = std::slice::from_ref(lhs.ref_field());
-            merge_ca(&lhs, &rhs, merge_indicator)
+            let encoded = ss
+                .iter()
+                .map(|s| s.row_encode_unordered())
+                .collect::<PolarsResult<Vec<_>>>()?;
+            let fields = std::slice::from_ref(encoded[0].ref_field());
+            let refs: Vec<&_> = encoded.iter().collect();
+            merge_ca(&refs, merge_indicator)
                 .row_decode_unordered(fields)?
                 .fields_as_series()
                 .pop()
@@ -296,10 +321,13 @@ fn merge_series(lhs: &Series, rhs: &Series, merge_indicator: &[bool]) -> PolarsR
         },
         List(_) => {
             // @Optimize. This is horrendous
-            let lhs = lhs.row_encode_unordered()?;
-            let rhs = rhs.row_encode_unordered()?;
-            let fields = std::slice::from_ref(lhs.ref_field());
-            merge_ca(&lhs, &rhs, merge_indicator)
+            let encoded = ss
+                .iter()
+                .map(|s| s.row_encode_unordered())
+                .collect::<PolarsResult<Vec<_>>>()?;
+            let fields = std::slice::from_ref(encoded[0].ref_field());
+            let refs: Vec<&_> = encoded.iter().collect();
+            merge_ca(&refs, merge_indicator)
                 .row_decode_unordered(fields)?
                 .fields_as_series()
                 .pop()
@@ -307,9 +335,14 @@ fn merge_series(lhs: &Series, rhs: &Series, merge_indicator: &[bool]) -> PolarsR
         },
         dt if dt.is_primitive_numeric() => {
             with_match_physical_numeric_polars_type!(dt, |$T| {
-                let lhs: &ChunkedArray<$T> = lhs.as_ref().as_ref().as_ref();
-                let rhs: &ChunkedArray<$T> = rhs.as_ref().as_ref().as_ref();
-                merge_ca(lhs, rhs, merge_indicator).into_series()
+                let refs: Vec<&ChunkedArray<$T>> = ss
+                    .iter()
+                    .map(|s| {
+                        let ca: &ChunkedArray<$T> = s.as_ref().as_ref().as_ref();
+                        ca
+                    })
+                    .collect_vec();
+                merge_ca(&refs, merge_indicator).into_series()
             })
         },
         dt => polars_bail!(op = "merge_sorted", dt),
@@ -317,28 +350,21 @@ fn merge_series(lhs: &Series, rhs: &Series, merge_indicator: &[bool]) -> PolarsR
     Ok(out)
 }
 
-fn merge_ca<'a, T>(
-    a: &'a ChunkedArray<T>,
-    b: &'a ChunkedArray<T>,
-    merge_indicator: &[bool],
-) -> ChunkedArray<T>
+fn merge_ca<'a, T>(cas: &[&'a ChunkedArray<T>], merge_indicator: &[u8]) -> ChunkedArray<T>
 where
     T: PolarsDataType + 'static,
     &'a ChunkedArray<T>: IntoIterator,
     T::Array: ArrayFromIterDtype<<&'a ChunkedArray<T> as IntoIterator>::Item>,
 {
-    let dtype = a.dtype().clone();
+    let dtype = cas[0].dtype().clone();
 
-    let total_len = a.len() + b.len();
-    let mut a = a.into_iter();
-    let mut b = b.into_iter();
+    let total_len = cas.iter().map(|ca| ca.len()).sum();
+    let mut cas = cas.iter().map(|ca| ca.into_iter()).collect_vec();
 
-    let iter = merge_indicator.iter().map(|a_indicator| {
-        if *a_indicator {
-            a.next().unwrap()
-        } else {
-            b.next().unwrap()
-        }
+    let iter = merge_indicator.iter().map(|indicator| unsafe {
+        cas.get_unchecked_mut(*indicator as usize)
+            .next()
+            .unwrap_unchecked()
     });
 
     // SAFETY: length is correct
@@ -348,7 +374,7 @@ where
     }
 }
 
-fn series_to_merge_indicator(lhs: &Series, rhs: &Series) -> PolarsResult<Vec<bool>> {
+fn series_to_merge_indicator(lhs: &Series, rhs: &Series) -> PolarsResult<Vec<u8>> {
     #[cfg(feature = "dtype-categorical")]
     if lhs.dtype().is_categorical() || lhs.dtype().is_enum() {
         let cat_phys = lhs.dtype().cat_physical().unwrap();
@@ -370,7 +396,7 @@ fn series_to_merge_indicator(lhs: &Series, rhs: &Series) -> PolarsResult<Vec<boo
     let rhs_s = rhs.to_physical_repr().into_owned();
 
     let out = match lhs_s.dtype() {
-        DataType::Null => vec![false; lhs.len() + rhs.len()],
+        DataType::Null => vec![0u8; lhs.len() + rhs.len()],
         DataType::Boolean => {
             let lhs = lhs_s.bool().unwrap();
             let rhs = rhs_s.bool().unwrap();
@@ -405,25 +431,24 @@ fn series_to_merge_indicator(lhs: &Series, rhs: &Series) -> PolarsResult<Vec<boo
     Ok(out)
 }
 
-// get a boolean values, left: true, right: false
-// that indicate from which side we should take a value
+// Produces an index sequence for merge_ca: 0 = take from a, 1 = take from b.
 fn get_merge_indicator<T>(
     mut a_iter: impl ExactSizeIterator<Item = T>,
     mut b_iter: impl ExactSizeIterator<Item = T>,
-) -> Vec<bool>
+) -> Vec<u8>
 where
     T: PartialOrd + Default + Copy,
 {
-    const A_INDICATOR: bool = true;
-    const B_INDICATOR: bool = false;
+    const A_INDICATOR: u8 = 0;
+    const B_INDICATOR: u8 = 1;
 
     let a_len = a_iter.size_hint().0;
     let b_len = b_iter.size_hint().0;
     if a_len == 0 {
-        return vec![true; b_len];
+        return vec![B_INDICATOR; b_len];
     };
     if b_len == 0 {
-        return vec![false; a_len];
+        return vec![A_INDICATOR; a_len];
     }
 
     let mut current_a = T::default();
@@ -472,7 +497,7 @@ where
 
 #[test]
 fn test_merge_sorted() {
-    fn get_merge_indicator_sliced<T: PartialOrd + Default + Copy>(a: &[T], b: &[T]) -> Vec<bool> {
+    fn get_merge_indicator_sliced<T: PartialOrd + Default + Copy>(a: &[T], b: &[T]) -> Vec<u8> {
         get_merge_indicator(a.iter().copied(), b.iter().copied())
     }
 
@@ -480,29 +505,25 @@ fn test_merge_sorted() {
     let b = [2, 3, 4, 5, 10];
 
     let out = get_merge_indicator_sliced(&a, &b);
-    let expected = [
-        true, true, false, false, true, false, false, true, true, false,
-    ];
-    //                       1     2     2      3      4     4      5      6     9     10
+    let expected = [0, 0, 1, 1, 0, 1, 1, 0, 0, 1];
+    //               1  2  2  3  4  4  5  6  9  10
     assert_eq!(out, expected);
 
     // swap
     // it is not the inverse because left is preferred when both are equal
     let out = get_merge_indicator_sliced(&b, &a);
-    let expected = [
-        false, true, false, true, true, false, true, false, false, true,
-    ];
+    let expected = [1, 0, 1, 0, 0, 1, 0, 1, 1, 0];
     assert_eq!(out, expected);
 
     let a = [5, 6, 7, 10];
     let b = [1, 2, 5];
     let out = get_merge_indicator_sliced(&a, &b);
-    let expected = [false, false, true, false, true, true, true];
+    let expected = [1, 1, 0, 1, 0, 0, 0];
     assert_eq!(out, expected);
 
     // swap
     // it is not the inverse because left is preferred when both are equal
     let out = get_merge_indicator_sliced(&b, &a);
-    let expected = [true, true, true, false, false, false, false];
+    let expected = [0, 0, 0, 1, 1, 1, 1];
     assert_eq!(out, expected);
 }
