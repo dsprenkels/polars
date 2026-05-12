@@ -170,15 +170,15 @@ where
     let dtype = a.dtype().clone();
 
     let total_len = a.len() + b.len();
-    let mut a = a.into_iter();
-    let mut b = b.into_iter();
 
-    let iter = merge_indicator.iter().map(|a_indicator| {
-        if *a_indicator {
-            a.next().unwrap()
-        } else {
-            b.next().unwrap()
-        }
+    let cas = [a.downcast_as_array(), b.downcast_as_array()];
+    let mut positions = [0, 0];
+    let iter = merge_indicator.iter().map(|a_indicator| unsafe {
+        let ca = *cas.get_unchecked(!a_indicator as usize);
+        let pos = positions.get_unchecked_mut(!a_indicator as usize);
+        let val = ca.get_unchecked(*pos);
+        *pos += 1;
+        val
     });
 
     // SAFETY: length is correct
