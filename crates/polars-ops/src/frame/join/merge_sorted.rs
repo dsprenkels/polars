@@ -357,14 +357,19 @@ where
     T::Array: ArrayFromIterDtype<<&'a ChunkedArray<T> as IntoIterator>::Item>,
 {
     let dtype = cas[0].dtype().clone();
-
     let total_len = cas.iter().map(|ca| ca.len()).sum();
-    let mut cas = cas.iter().map(|ca| ca.into_iter()).collect_vec();
-
+    let cas = cas
+        .into_iter()
+        .map(|ca| ca.downcast_as_array())
+        .collect_vec();
+    let mut positions = vec![0; cas.len()];
     let iter = merge_indicator.iter().map(|indicator| unsafe {
-        cas.get_unchecked_mut(*indicator as usize)
-            .next()
-            .unwrap_unchecked()
+        let ca_idx = *indicator as usize;
+        let ca = *cas.get_unchecked(ca_idx);
+        let pos = positions.get_unchecked_mut(ca_idx);
+        let val = ca.get_unchecked(*pos);
+        *pos += 1;
+        val
     });
 
     // SAFETY: length is correct
