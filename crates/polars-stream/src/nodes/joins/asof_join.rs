@@ -220,7 +220,6 @@ impl ComputeNode for AsOfJoinNode {
                 send[0] = PortState::Done;
             },
         }
-
         Ok(())
     }
 
