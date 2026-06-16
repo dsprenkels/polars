@@ -160,7 +160,7 @@ impl AsOfJoinNode {
 
 impl ComputeNode for AsOfJoinNode {
     fn name(&self) -> &str {
-        "asof-join"
+        dbg!("asof-join")
     }
 
     fn update_state(
