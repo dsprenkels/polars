@@ -186,6 +186,7 @@ impl ComputeNode for AsOfJoinNode {
         let recv0_blocked = recv[0] == PortState::Blocked;
         let recv1_blocked = recv[1] == PortState::Blocked;
         let send_blocked = send[0] == PortState::Blocked;
+
         match self.state {
             AsOfJoinState::Running => {
                 recv[0] = PortState::Ready;
