@@ -122,7 +122,7 @@ jobs:
           env-vars: ImageVersion
           workspaces: py-polars
           save-if: ${{ github.event_name == 'push' }}
-          key: ${{ github.ref_name }}
+          key: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
 
       - name: Install Polars
         run: |
