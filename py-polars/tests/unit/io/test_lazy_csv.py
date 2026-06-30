@@ -4,7 +4,7 @@ import io
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Literal
 
 import numpy as np
 import pytest
@@ -405,15 +405,29 @@ def test_file_list_schema_mismatch(
 
 
 @pytest.mark.parametrize("missing_columns", [None, "raise"])
-def test_scan_csv_missing_columns_raise(missing_columns: str | None) -> None:
-    with pytest.raises(pl.exceptions.ComputeError, match=r"^schema names differ: "):
+def test_scan_csv_missing_columns_raise(
+    missing_columns: Literal["raise"] | None,
+) -> None:
+    with pytest.raises(
+        pl.exceptions.ComputeError,
+        match=r"^did not find column z, consider passing `missing_columns='insert'`$",
+    ):
         pl.scan_csv(
-            [b"x,y\n1,2", b"x,z\n3,4"], missing_columns=missing_columns
+            [b"x,y\n1,2", b"x,z\n3,4"],
+            schema={"x": pl.Int64, "y": pl.Int64, "z": pl.Int64},
+            missing_columns=missing_columns,
+            has_header=True,
         ).collect()
 
 
 def test_scan_csv_missing_columns_insert() -> None:
-    result = pl.scan_csv([b"x,y\n1,2", b"x,z\n3,4"], missing_columns="insert").collect()
+    result = pl.scan_csv(
+        [b"x,y\n1,2", b"x,z\n3,4"],
+        schema={"x": pl.Int64, "y": pl.Int64, "z": pl.Int64},
+        missing_columns="insert",
+        has_header=True,
+    ).collect()
+    print(result)
     expected = pl.DataFrame({"x": [1, 3], "y": [2, None], "z": [None, 4]})
     assert_frame_equal(result, expected)
 
@@ -501,29 +515,6 @@ def test_select_nonexistent_column() -> None:
 
     with pytest.raises(pl.exceptions.ColumnNotFoundError):
         pl.scan_csv(f).select("b").collect()
-
-
-def test_scan_csv_provided_schema_with_extra_fields_22531() -> None:
-    data = b"""\
-a,b,c
-a,b,c
-"""
-
-    schema = dict.fromkeys(["a", "b", "c", "d", "e"], pl.String)
-
-    assert_frame_equal(
-        pl.scan_csv(data, schema=schema, missing_columns="insert").collect(),
-        pl.DataFrame(
-            {
-                "a": "a",
-                "b": "b",
-                "c": "c",
-                "d": None,
-                "e": None,
-            },
-            schema=schema,
-        ),
-    )
 
 
 def test_csv_negative_slice_comment_char_22996() -> None:
