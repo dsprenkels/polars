@@ -58,6 +58,7 @@ workspace = true
 features = [
   "abs",
   "approx_unique",
+  "approx_quantile",
   "arg_where",
   "bitwise",
   "business",
@@ -194,6 +195,7 @@ find_many = ["polars/find_many"]
 streaming = ["polars-lazy/streaming"]
 bitwise = ["polars/bitwise"]
 approx_unique = ["polars/approx_unique"]
+approx_quantile = ["polars/approx_quantile"]
 string_normalize = ["polars/string_normalize"]
 
 dtype-i8 = []
@@ -220,6 +222,7 @@ dtypes = [
 
 operations = [
   "approx_unique",
+  "approx_quantile",
   "array_count",
   "bitwise",
   "is_in",

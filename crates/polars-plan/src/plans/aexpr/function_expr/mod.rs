@@ -238,6 +238,10 @@ pub enum IRFunctionExpr {
     UniqueCounts,
     #[cfg(feature = "approx_unique")]
     ApproxNUnique,
+    #[cfg(feature = "approx_quantile")]
+    ApproxQuantile {
+        error: f64,
+    },
     Coalesce,
     #[cfg(feature = "diff")]
     Diff(NullBehavior),
@@ -592,6 +596,8 @@ impl Hash for IRFunctionExpr {
             UniqueCounts => {},
             #[cfg(feature = "approx_unique")]
             ApproxNUnique => {},
+            #[cfg(feature = "approx_quantile")]
+            ApproxQuantile { error } => error.to_bits().hash(state),
             Coalesce => {},
             #[cfg(feature = "pct_change")]
             PctChange => {},
@@ -826,6 +832,8 @@ impl Display for IRFunctionExpr {
             Reverse => "reverse",
             #[cfg(feature = "approx_unique")]
             ApproxNUnique => "approx_n_unique",
+            #[cfg(feature = "approx_quantile")]
+            ApproxQuantile { .. } => "approx_quantile",
             Coalesce => "coalesce",
             #[cfg(feature = "diff")]
             Diff(_) => "diff",
@@ -1148,6 +1156,10 @@ impl IRFunctionExpr {
             F::UniqueCounts => FunctionOptions::groupwise(),
             #[cfg(feature = "approx_unique")]
             F::ApproxNUnique => {
+                FunctionOptions::aggregation().flag(FunctionFlags::NON_ORDER_OBSERVING)
+            },
+            #[cfg(feature = "approx_quantile")]
+            F::ApproxQuantile { .. } => {
                 FunctionOptions::aggregation().flag(FunctionFlags::NON_ORDER_OBSERVING)
             },
             F::Coalesce => FunctionOptions::elementwise()
