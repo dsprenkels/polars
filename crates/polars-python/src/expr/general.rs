@@ -463,6 +463,14 @@ impl PyExpr {
         self.inner.clone().approx_n_unique().into()
     }
 
+    #[cfg(feature = "approx_quantile")]
+    fn approx_quantile(&self, quantile: Self, error: f64) -> Self {
+        self.inner
+            .clone()
+            .approx_quantile(quantile.inner, error)
+            .into()
+    }
+
     fn is_first_distinct(&self) -> Self {
         self.inner.clone().is_first_distinct().into()
     }
