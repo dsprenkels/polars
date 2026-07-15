@@ -9752,7 +9752,7 @@ class Series:
     def approx_quantile(
         self, quantile: float | list[float], error: 1 / 1_000_000
     ) -> PythonLiteral:
-        (
+        return (
             self.to_frame()
             .select_seq(F.col(self.name).approx_quantile(quantile, error=error))
             .to_series()
