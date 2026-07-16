@@ -1,8 +1,16 @@
+use std::fmt;
+
 use crate::UnitVec;
 
 /// Vec container with a getter that clears the vec.
 #[derive(Default)]
 pub struct ScratchVec<T>(Vec<T>);
+
+impl<T: fmt::Debug> fmt::Debug for ScratchVec<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ScratchVec").field(&self.0).finish()
+    }
+}
 
 impl<T> ScratchVec<T> {
     pub fn with_capacity(capacity: usize) -> Self {
