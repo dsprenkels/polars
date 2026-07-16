@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::fmt;
 
 use crate::UnitVec;
@@ -6,9 +7,11 @@ use crate::UnitVec;
 #[derive(Default)]
 pub struct ScratchVec<T>(Vec<T>);
 
-impl<T: fmt::Debug> fmt::Debug for ScratchVec<T> {
+impl<T> fmt::Debug for ScratchVec<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ScratchVec").field(&self.0).finish()
+        f.debug_tuple("ScratchVec")
+            .field(&Vec::<Infallible>::new())
+            .finish()
     }
 }
 

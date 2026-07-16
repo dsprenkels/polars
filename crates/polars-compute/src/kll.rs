@@ -1,15 +1,19 @@
-use std::fmt;
+use std::{fmt, mem};
 
 use polars_utils::scratch_vec::ScratchVec;
 use polars_utils::total_ord::TotalOrd;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 
+use crate::kll::KLLSketch::Finalized;
+
 /// KLL calls this `δ`. Equivalent to 99% success rate.
 const FAILURE_PROBABILITY: f64 = 0.01;
 /// `CAPACITY_DECAY` specifies how much smaller compactor h+1 is wrt to h.
 /// KLL calls this `c`.
 const CAPACITY_DECAY: f64 = 2.0 / 3.0;
+
+const MIN_COMPACTOR_SIZE: usize = 2;
 
 fn compute_k(error: f64, delta: f64, c: f64) -> usize {
     /*
@@ -49,7 +53,7 @@ struct Level {
 }
 
 #[derive(Debug)]
-pub struct KLLSketch<T: fmt::Debug + Clone + TotalOrd> {
+struct IngestingState<T: fmt::Debug + Clone + TotalOrd> {
     /// Contents of the compactors. The offsets of the compactors are stored
     /// in the levels vector. The top-level compactor is stored at the start
     /// of this Vec, and the bottom-most compactor is stored at the end of this
@@ -60,59 +64,87 @@ pub struct KLLSketch<T: fmt::Debug + Clone + TotalOrd> {
     /// and height *0*. So the order of `levels` is *reversed* wrt `items`.
     items: Vec<T>,
     levels: Vec<Level>,
-    /// Unsorted ingestation buffer of all of the items.
+    scratch: ScratchVec<T>,
     consumed_items: usize,
     max_items: usize,
     k: usize,
     rng: SmallRng,
-    scratch: ScratchVec<T>,
+}
+
+#[derive(Debug)]
+struct FinalizedState<T: fmt::Debug + Clone + TotalOrd> {
+    items: Box<[T]>,
+    cum_weight: Box<[usize]>,
+}
+
+#[derive(Debug)]
+pub enum KLLSketch<T: fmt::Debug + Clone + TotalOrd> {
+    Ingesting(IngestingState<T>),
+    Finalized(FinalizedState<T>),
 }
 
 impl<T: fmt::Debug + Clone + TotalOrd> KLLSketch<T> {
     pub fn new(error: f64) -> Self {
         let k = compute_k(error, FAILURE_PROBABILITY, CAPACITY_DECAY);
-        dbg!(k);
-
-        // The expected capacity of the vec is equal to the sum of the size of each compactor,
-        // which is [k, (2/3)*k, (2/3)²*k, ...].  The sum of this geometric series is equal to
-        // k / (1 - 2/3) = 3*k
-        let max_items = k;
-        let items: Vec<T> = Vec::with_capacity(3 * k);
-
-        let topmost_level = Level { offset: 0, size: 0 };
-        let levels = vec![topmost_level];
-        let rng = SmallRng::from_rng(&mut rand::rng());
-
-        Self {
-            items,
-            levels,
+        let state = IngestingState {
+            // The expected capacity of the vec is equal to the sum of the size of each compactor,
+            // which is [k, (2/3)*k, (2/3)²*k, ...].  The sum of this geometric series is equal to
+            // k / (1 - 2/3) = 3*k
+            items: Vec::with_capacity(3 * k),
+            levels: vec![Level { offset: 0, size: 0 }],
             consumed_items: 0,
-            max_items,
+            max_items: k,
             k,
-            rng,
+            rng: SmallRng::from_rng(&mut rand::rng()),
             scratch: ScratchVec::with_capacity(k),
-        }
+        };
+        KLLSketch::Ingesting(state)
     }
 
-    pub fn update(&mut self, val: T) {
-        self.items.push(val);
-        self.consumed_items += 1;
-        self.levels.last_mut().unwrap().size += 1;
-        if self.items.len() > self.max_items {
-            self.compact();
-        }
+    #[inline]
+    pub fn update(&mut self, value: T) {
+        let KLLSketch::Ingesting(state) = self else {
+            unreachable!()
+        };
+        state.update(value);
     }
 
     pub fn finalize(&mut self) {
-        todo!()
+        // Swap in an empty placeholder so we can move the ingesting state out
+        // from behind `&mut self`.
+        let placeholder = Finalized(FinalizedState {
+            items: Box::default(),
+            cum_weight: Box::default(),
+        });
+        let KLLSketch::Ingesting(state) = mem::replace(self, placeholder) else {
+            unreachable!()
+        };
+        *self = Finalized(state.finalize());
     }
 
-    pub fn estimate_rank(&mut self, _val: T) {
-        todo!()
+    pub fn estimate_rank(&self, value: &T) -> usize {
+        let KLLSketch::Finalized(state) = self else {
+            unreachable!()
+        };
+        state.estimate_rank(value)
     }
 
-    pub fn estimate_quantile(&mut self, _quantile: f64) -> T {
-        todo!()
+    pub fn estimate_quantile(&self, quantile: f64) -> &T {
+        let KLLSketch::Finalized(state) = self else {
+            unreachable!()
+        };
+        state.estimate_quantile(quantile)
+    }
+}
+
+impl<T: fmt::Debug + Clone + TotalOrd> IngestingState<T> {
+    pub fn update(&mut self, value: T) {
+        if self.items.len() >= self.max_items {
+            self.compact();
+        }
+        self.items.push(value);
+        self.consumed_items += 1;
+        self.levels.first_mut().unwrap().size += 1;
     }
 
     fn compact(&mut self) {
@@ -121,7 +153,7 @@ impl<T: fmt::Debug + Clone + TotalOrd> KLLSketch<T> {
             .levels
             .iter()
             .enumerate()
-            .find(|(h, l)| l.size >= compactor_threshold(self.k, num_levels - h - 1))
+            .find(|(depth, l)| l.size >= compactor_threshold(self.k, num_levels - 1 - depth))
         else {
             return;
         };
@@ -142,24 +174,26 @@ impl<T: fmt::Debug + Clone + TotalOrd> KLLSketch<T> {
         let mut compact_level = self.levels[level];
         let mut next_level = self.levels[level + 1];
         let compact_start = compact_level.offset;
-        let compact_end = compact_start + compact_level.size;
+        let mut compact_end = compact_start + compact_level.size;
+        let old_compact_end = compact_end;
         let next_start = next_level.offset;
         let next_end = next_start + next_level.size;
         let buf = self.scratch.get();
 
+        // If there is an odd number of items in this compactor, stash the "straggler" to add it back later
+        let mut straggler = None;
+        if compact_level.size % 2 == 1 {
+            straggler = Some(self.items[old_compact_end - 1].clone());
+            compact_end -= 1;
+        }
+
         // The base compactor is not sorted yet
-        if level == self.levels.len() - 1 {
+        if level == 0 {
             self.items[compact_start..compact_end].sort_unstable_by(TotalOrd::tot_cmp);
         }
 
         let next_level_items = self.items[next_start..next_end].iter().cloned();
         let mut compacted_items = self.items[compact_start..compact_end].iter().cloned();
-
-        // If there is an odd number of items in this compactor, stash the "straggler" to add it back later
-        let mut straggler = None;
-        if compact_level.size % 2 == 1 {
-            straggler = compacted_items.next_back();
-        }
 
         // Throw away half of the values during the compaction
         let coin: bool = self.rng.random();
@@ -170,8 +204,8 @@ impl<T: fmt::Debug + Clone + TotalOrd> KLLSketch<T> {
 
         // Merge the items into the next compactor
         merge_sorted(buf, next_level_items, compacted_items);
+        self.items[next_start..next_start + buf.len()].clone_from_slice(&buf);
         next_level.size = buf.len();
-        self.items[next_start..next_start + next_level.size].clone_from_slice(&buf);
 
         // Add back the straggler
         compact_level.offset = next_level.offset + next_level.size;
@@ -184,19 +218,92 @@ impl<T: fmt::Debug + Clone + TotalOrd> KLLSketch<T> {
         let new_compact_end = compact_level.offset + compact_level.size;
 
         // Shift all of the compactors below the current one
-        let shift = compact_end - new_compact_end;
-        self.items.drain(new_compact_end..compact_end);
+        let shift = old_compact_end - new_compact_end;
+        self.items.drain(new_compact_end..old_compact_end);
         for level_below_compact in self.levels[..level].iter_mut() {
             level_below_compact.offset -= shift;
         }
         self.levels[level] = compact_level;
         self.levels[level + 1] = next_level;
+
+        // Check that all the offsets are correct
+        let mut offset = 0;
+        for level in self.levels.iter().rev() {
+            debug_assert_eq!(level.offset, offset);
+            offset += level.size;
+        }
+        debug_assert_eq!(offset, self.items.len());
+    }
+
+    fn finalize(mut self) -> FinalizedState<T> {
+        // Base level is not yet sorted
+        let base = self.levels[0];
+        self.items[base.offset..base.offset + base.size].sort_unstable_by(TotalOrd::tot_cmp);
+
+        // Merge all sorted levels
+        let mut items = Vec::with_capacity(self.items.len());
+        let mut cum_weights = Vec::with_capacity(self.items.len());
+        let mut cursors: Vec<usize> = vec![0; self.levels.len()];
+
+        // Are we done draining this level?
+        let is_done = |level: usize, cursors: &[usize]| cursors[level] >= self.levels[level].size;
+        // Get the next value corresponding to level `level`.
+        let next_value = |level: usize, cursors: &[usize]| {
+            &self.items[self.levels[level].offset + cursors[level]]
+        };
+
+        while let Some(level_idx) = (0..self.levels.len())
+            .filter(|i| !is_done(*i, &cursors))
+            .min_by(|i1, i2| {
+                TotalOrd::tot_cmp(next_value(*i1, &cursors), next_value(*i2, &cursors))
+            })
+        {
+            let level = self.levels[level_idx];
+            let item = self.items[level.offset + cursors[level_idx]].clone();
+            let weight = 2usize.pow(level_idx as u32);
+            let cum_weight = *cum_weights.last().unwrap_or(&0) + weight;
+            items.push(item);
+            cum_weights.push(cum_weight);
+            cursors[level_idx] += 1;
+        }
+
+        debug_assert_eq!(items.len(), self.items.len());
+        debug_assert_eq!(cum_weights.len(), self.items.len());
+        debug_assert_eq!(cum_weights.last().unwrap_or(&0), &self.consumed_items);
+
+        FinalizedState {
+            items: items.into_boxed_slice(),
+            cum_weight: cum_weights.into_boxed_slice(),
+        }
+    }
+}
+
+impl<T: fmt::Debug + Clone + TotalOrd> FinalizedState<T> {
+    fn num_items(&self) -> usize {
+        self.cum_weight.last().map(|x| *x).unwrap_or(0)
+    }
+
+    fn estimate_rank(&self, value: &T) -> usize {
+        todo!()
+    }
+
+    fn estimate_quantile(&self, quantile: f64) -> &T {
+        let estimated_rank = (self.num_items() as f64 * quantile).round_ties_even() as usize;
+        let idx = match self.cum_weight.binary_search(&estimated_rank) {
+            Ok(x) => x,
+            Err(x) => x,
+        };
+        &self.items[idx]
     }
 }
 
 fn compactor_threshold(k: usize, depth: usize) -> usize {
+    // TODO: [amber] This function is O(depth). Can we improve this?
     let depth = u32::try_from(depth).expect("overflow");
-    usize::max(k * 2usize.pow(depth).div_ceil(3usize.pow(depth)), 2)
+    usize::max(
+        (k * 2usize.pow(depth)).div_ceil(3usize.pow(depth)),
+        MIN_COMPACTOR_SIZE,
+    )
 }
 
 fn merge_sorted<T: TotalOrd>(

@@ -9750,7 +9750,7 @@ class Series:
         return self._s.approx_n_unique()
 
     def approx_quantile(
-        self, quantile: float | list[float], error: 1 / 1_000_000
+        self, quantile: float | list[float], error: float = 1 / 1_000_000
     ) -> PythonLiteral:
         return (
             self.to_frame()
