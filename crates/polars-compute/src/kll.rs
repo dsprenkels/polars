@@ -148,12 +148,11 @@ impl<T: fmt::Debug + Clone + TotalOrd> IngestingState<T> {
     }
 
     fn compact(&mut self) {
-        let num_levels = self.levels.len();
         let Some((level, _)) = self
             .levels
             .iter()
             .enumerate()
-            .find(|(depth, l)| l.size >= compactor_threshold(self.k, num_levels - 1 - depth))
+            .find(|(height, l)| l.size >= compactor_threshold(self.k, self.levels.len() - 1 - height))
         else {
             return;
         };
@@ -312,10 +311,33 @@ impl<T: fmt::Debug + Clone + TotalOrd> FinalizedState<T> {
 }
 
 fn compactor_threshold(k: usize, depth: usize) -> usize {
-    // TODO: [amber] This function is O(depth). Can we improve this?
-    let depth = u32::try_from(depth).expect("overflow");
+    // Table of 2^63 * (2/3)^i
+    const TABLE_SIZE: usize = 64;
+    const MUL: [u64; TABLE_SIZE] = {
+        let mut result = [0u64; TABLE_SIZE];
+        let mut numerator: u128 = 1;
+        let mut denominator: u128 = 1;
+        let mut i = 0;
+        while i < TABLE_SIZE {
+            let mut c = 1u128 << 63;
+            c *= numerator;
+            c /= denominator;
+            result[i] = c as u64;
+            numerator *= 2;
+            denominator *= 3;
+            i += 1;
+        }
+        result
+    };
+    // Compute ceil(k * 2^i / 3^i) as (k * MUL[i] + (2^63 - 1)) >> 63.
+    let nominal_size =
+        (((k as u128) * (MUL[depth] as u128) + (1u128 << 63) - 1) >> 63) as u64;
+    debug_assert_eq!(
+        nominal_size,
+        ((k as u128) * 2u128.pow(depth as u32)).div_ceil(3u128.pow(depth as u32)) as u64
+    );
     usize::max(
-        (k * 2usize.pow(depth)).div_ceil(3usize.pow(depth)),
+        usize::try_from(nominal_size).expect("overflow"),
         MIN_COMPACTOR_SIZE,
     )
 }
