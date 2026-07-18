@@ -1,11 +1,8 @@
 use std::{fmt, mem};
 
-use polars_utils::scratch_vec::ScratchVec;
 use polars_utils::total_ord::TotalOrd;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
-
-use crate::kll::KLLSketch::Finalized;
 
 /// KLL calls this `δ`. Equivalent to 99% success rate.
 const FAILURE_PROBABILITY: f64 = 0.01;
@@ -64,24 +61,28 @@ struct IngestingState<T: fmt::Debug + Clone + TotalOrd> {
     /// and height *0*. So the order of `levels` is *reversed* wrt `items`.
     items: Vec<T>,
     levels: Vec<Level>,
-    scratch: ScratchVec<T>,
     consumed_items: usize,
     max_items: usize,
     k: usize,
     rng: SmallRng,
+    scratch: Vec<T>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct FinalizedState<T: fmt::Debug + Clone + TotalOrd> {
     items: Box<[T]>,
     cum_weight: Box<[usize]>,
 }
 
 #[derive(Debug)]
-pub enum KLLSketch<T: fmt::Debug + Clone + TotalOrd> {
+enum State<T: fmt::Debug + Clone + TotalOrd> {
     Ingesting(IngestingState<T>),
     Finalized(FinalizedState<T>),
 }
+
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct KLLSketch<T: fmt::Debug + Clone + TotalOrd>(State<T>);
 
 impl<T: fmt::Debug + Clone + TotalOrd> KLLSketch<T> {
     pub fn new(error: f64) -> Self {
@@ -96,41 +97,40 @@ impl<T: fmt::Debug + Clone + TotalOrd> KLLSketch<T> {
             max_items: k,
             k,
             rng: SmallRng::from_rng(&mut rand::rng()),
-            scratch: ScratchVec::with_capacity(k),
+            scratch: Vec::default(),
         };
-        KLLSketch::Ingesting(state)
+        KLLSketch(State::Ingesting(state))
     }
 
     #[inline]
     pub fn update(&mut self, value: T) {
-        let KLLSketch::Ingesting(state) = self else {
+        let State::Ingesting(state) = &mut self.0 else {
             unreachable!()
         };
         state.update(value);
     }
 
     pub fn finalize(&mut self) {
-        // Swap in an empty placeholder so we can move the ingesting state out
-        // from behind `&mut self`.
-        let placeholder = Finalized(FinalizedState {
-            items: Box::default(),
-            cum_weight: Box::default(),
+        let placeholder = State::Finalized(FinalizedState {
+            items: Box::new([]),
+            cum_weight: Box::new([]),
         });
-        let KLLSketch::Ingesting(state) = mem::replace(self, placeholder) else {
+        let state = mem::replace(&mut self.0, placeholder);
+        let State::Ingesting(state) = state else {
             unreachable!()
         };
-        *self = Finalized(state.finalize());
+        self.0 = State::Finalized(state.finalize());
     }
 
     pub fn estimate_rank(&self, value: &T) -> usize {
-        let KLLSketch::Finalized(state) = self else {
+        let State::Finalized(state) = &self.0 else {
             unreachable!()
         };
         state.estimate_rank(value)
     }
 
     pub fn estimate_quantile(&self, quantile: f64) -> &T {
-        let KLLSketch::Finalized(state) = self else {
+        let State::Finalized(state) = &self.0 else {
             unreachable!()
         };
         state.estimate_quantile(quantile)
@@ -178,7 +178,8 @@ impl<T: fmt::Debug + Clone + TotalOrd> IngestingState<T> {
         let old_compact_end = compact_end;
         let next_start = next_level.offset;
         let next_end = next_start + next_level.size;
-        let buf = self.scratch.get();
+        self.scratch.clear();
+        let buf = &mut self.scratch;
 
         // If there is an odd number of items in this compactor, stash the "straggler" to add it back later
         let mut straggler = None;
@@ -235,44 +236,57 @@ impl<T: fmt::Debug + Clone + TotalOrd> IngestingState<T> {
         debug_assert_eq!(offset, self.items.len());
     }
 
-    fn finalize(mut self) -> FinalizedState<T> {
+    fn finalize(self) -> FinalizedState<T> {
+        let IngestingState {
+            mut items,
+            levels,
+            mut scratch,
+            ..
+        } = self;
+
         // Base level is not yet sorted
-        let base = self.levels[0];
-        self.items[base.offset..base.offset + base.size].sort_unstable_by(TotalOrd::tot_cmp);
+        let base = levels[0];
+        items[base.offset..base.offset + base.size].sort_unstable_by(TotalOrd::tot_cmp);
 
         // Merge all sorted levels
-        let mut items = Vec::with_capacity(self.items.len());
-        let mut cum_weights = Vec::with_capacity(self.items.len());
-        let mut cursors: Vec<usize> = vec![0; self.levels.len()];
+        scratch.clear();
+        let mut finalized_items = scratch;
+        let mut cum_weights = Vec::with_capacity(items.len());
+        let mut cursors: Vec<usize> = vec![0; levels.len()];
+
+        // TODO: [amber] I think it would be nice if, in case we only have a base layer, we just
+        // sort and return it, and keep `cursors` empty. This would save an allocation.
 
         // Are we done draining this level?
-        let is_done = |level: usize, cursors: &[usize]| cursors[level] >= self.levels[level].size;
+        let is_done = |level: usize, cursors: &[usize]| cursors[level] >= levels[level].size;
         // Get the next value corresponding to level `level`.
-        let next_value = |level: usize, cursors: &[usize]| {
-            &self.items[self.levels[level].offset + cursors[level]]
-        };
+        let next_value =
+            |level: usize, cursors: &[usize]| &items[levels[level].offset + cursors[level]];
 
-        while let Some(level_idx) = (0..self.levels.len())
-            .filter(|i| !is_done(*i, &cursors))
-            .min_by(|i1, i2| {
-                TotalOrd::tot_cmp(next_value(*i1, &cursors), next_value(*i2, &cursors))
-            })
+        // H-way merge-sort
+        finalized_items.reserve_exact(items.len());
+        while let Some(level_idx) =
+            (0..levels.len())
+                .filter(|i| !is_done(*i, &cursors))
+                .min_by(|i1, i2| {
+                    TotalOrd::tot_cmp(next_value(*i1, &cursors), next_value(*i2, &cursors))
+                })
         {
-            let level = self.levels[level_idx];
-            let item = self.items[level.offset + cursors[level_idx]].clone();
+            let level = levels[level_idx];
+            let item = items[level.offset + cursors[level_idx]].clone();
             let weight = 2usize.pow(level_idx as u32);
             let cum_weight = *cum_weights.last().unwrap_or(&0) + weight;
-            items.push(item);
+            finalized_items.push(item);
             cum_weights.push(cum_weight);
             cursors[level_idx] += 1;
         }
 
-        debug_assert_eq!(items.len(), self.items.len());
-        debug_assert_eq!(cum_weights.len(), self.items.len());
+        debug_assert_eq!(finalized_items.len(), items.len());
+        debug_assert_eq!(cum_weights.len(), items.len());
         debug_assert_eq!(cum_weights.last().unwrap_or(&0), &self.consumed_items);
 
         FinalizedState {
-            items: items.into_boxed_slice(),
+            items: finalized_items.into_boxed_slice(),
             cum_weight: cum_weights.into_boxed_slice(),
         }
     }
@@ -308,9 +322,10 @@ fn compactor_threshold(k: usize, depth: usize) -> usize {
 
 fn merge_sorted<T: TotalOrd>(
     vec: &mut Vec<T>,
-    iter1: impl Iterator<Item = T>,
-    iter2: impl Iterator<Item = T>,
+    iter1: impl ExactSizeIterator<Item = T>,
+    iter2: impl ExactSizeIterator<Item = T>,
 ) {
+    vec.reserve(iter1.len() + iter2.len());
     let mut iter1 = iter1.peekable();
     let mut iter2 = iter2.peekable();
     loop {
