@@ -39,6 +39,8 @@ pub use array::ArrayFunction;
 #[cfg(feature = "cov")]
 pub use correlation::CorrelationMethod;
 pub use list::ListFunction;
+#[cfg(feature = "approx_quantile")]
+use polars_compute::approx_quantile::ApproxQuantileMethod;
 pub use polars_core::datatypes::ReshapeDimension;
 use polars_core::prelude::*;
 #[cfg(feature = "random")]
@@ -230,6 +232,7 @@ pub enum FunctionExpr {
     ApproxNUnique,
     #[cfg(feature = "approx_quantile")]
     ApproxQuantile {
+        method: ApproxQuantileMethod,
         error: f64,
     },
     Coalesce,
@@ -584,7 +587,10 @@ impl Hash for FunctionExpr {
             #[cfg(feature = "approx_unique")]
             ApproxNUnique => {},
             #[cfg(feature = "approx_quantile")]
-            ApproxQuantile { error } => error.to_bits().hash(state),
+            ApproxQuantile { method, error } => {
+                method.hash(state);
+                error.to_bits().hash(state);
+            },
             Coalesce => {},
             #[cfg(feature = "pct_change")]
             PctChange => {},

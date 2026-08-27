@@ -128,6 +128,7 @@ if TYPE_CHECKING:
 
     from polars import DataFrame, DataType, Expr
     from polars._typing import (
+        ApproxQuantileMethod,
         ArrayLike,
         BufferInfo,
         ClosedInterval,
@@ -9876,12 +9877,17 @@ class Series:
         return self._s.approx_n_unique()
 
     def approx_quantile(
-        self, quantile: float | list_[float], error: float = 1 / 100
+        self,
+        quantile: float | list_[float],
+        error: float = 1 / 100,
+        method: ApproxQuantileMethod = "auto",
     ) -> PythonLiteral:
         """[amber] TODO."""
         return (
             self.to_frame()
-            .select_seq(F.col(self.name).approx_quantile(quantile, error=error))
+            .select_seq(
+                F.col(self.name).approx_quantile(quantile, error=error, method=method)
+            )
             .to_series()
             .item()
         )
