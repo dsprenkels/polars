@@ -426,13 +426,16 @@ pub mod kll {
             let window_rest = promote_weight - self.weight;
             if (remaining as u64) < window_rest {
                 let total_weight = self.weight + remaining as u64;
+                let mut rest = remaining as u64;
                 if let Some(idx) = rng.random_range(0..total_weight).checked_sub(self.weight) {
                     let item = items.nth(idx as usize).unwrap();
                     match &mut self.item {
                         Some(held) => item.borrow().clone_into(held),
                         None => self.item = Some(item.borrow().to_owned()),
                     }
+                    rest -= idx + 1;
                 }
+                skip(items, rest);
                 self.weight = total_weight;
                 return (remaining, None);
             }
@@ -1097,6 +1100,18 @@ pub mod kll {
                 .sum();
             // The 0.999 quantile of chi² with 7 degrees of freedom.
             assert!(chi2 < 24.32, "chi² = {chi2}, counts = {counts:?}");
+        }
+
+        #[test]
+        fn update_drains_borrowed_iterator() {
+            const N: u64 = 1_001_000;
+            let items: Vec<u64> = (0..N).collect();
+            let mut iter = items.iter();
+            let mut sketch = KLLSketch::<u64>::new(ERROR, DEFAULT_FAILURE_PROBABILITY);
+            while iter.len() > 0 {
+                sketch.update::<u64>(iter.by_ref().take(7));
+            }
+            assert_eq!(sketch.0.consumed_items, N);
         }
     }
 }
